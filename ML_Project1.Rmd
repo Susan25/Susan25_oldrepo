@@ -1,0 +1,153 @@
+---
+title: "MLProject"
+author: "Susan Vogel"
+date: "Thursday, September 24, 2015"
+output: html_document
+---
+
+THe objective of this project is to predict how well a group of people are performing exercises based upon measurements taken from accelerometer data while they exercised. The data contain results from six participants, who were asked to perform exercises both correctly and incorrectly, while recording the results. The source of this data is: 
+
+http://groupware.les.inf.puc=rio.br/har
+
+To begin the analysis, both the training and test data was ingested into separate data frames. As there were several records with #DIV/0! values, this was stripped out of data frame on ingest by setting these values to NA. Next, the summary records were removed, as they only contained statistical summaries of the other variables. Next, columns with 'NA' were removed from the analysis. Finally, the training set was split into training and validation sets (70/30 ratio), so that an estimate of the out of sample error could be obtained.
+
+```{r SETUP,message=FALSE, warning=FALSE}
+
+setwd("C:/Users/Susan/Documents/DataScientistsToolbox/MachineLearning")
+# function from ML class to wite out results to individual files
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+library(ggplot2)
+library(caret)
+
+pmldata <- read.csv("./Project/pml-training.csv",na.strings=c('#DIV/0!'),sep=',',stringsAsFactors=FALSE)
+pmltest <- read.csv("./Project/pml-testing.csv",na.strings=c('DIV/0!'),sep=',',stringsAsFactors=FALSE)
+
+# Get rid of summary records
+pmlDetail <- pmldata[pmldata$new_window=="no",]
+pmlTest   <- pmltest[pmltest$new_window=="no",]
+
+# Eliminate timestamp and name data
+pmldetailnames <- names(pmlDetail[-(1:7)])
+pmltestnames <- names(pmlTest[-(1:7)])
+
+
+pmlDetailSubset <- pmlDetail[,pmldetailnames]
+pmlTestSubset   <- pmlTest[,pmltestnames]
+
+# Extract out our response variable to prepare rest of dataset for cleaning
+classe = pmlDetailSubset$classe
+
+
+pmlDetailSubset$classe = NULL
+pmlTestSubset$problem_id = NULL
+
+# Convert all fields to numeric and then remove columns with all 'NA'
+
+pmlDetailSubset <- data.frame(lapply(pmlDetailSubset,as.numeric))
+pmlDetailSubset <- cbind(pmlDetailSubset,classe)
+pmlDetailSubset <- pmlDetailSubset[,colSums(is.na(pmlDetailSubset))<nrow(pmlDetailSubset)]
+
+
+pmlTestSubset <- data.frame(lapply(pmlTestSubset,as.numeric))
+
+pmlTestSubset <- pmlTestSubset[,colSums(is.na(pmlTestSubset))<nrow(pmlTestSubset)]
+
+# split into training and validation datasets
+
+inTrain =  createDataPartition(y=pmlDetailSubset$classe,p=0.7,list=FALSE)
+training <- pmlDetailSubset[inTrain,]
+validation <- pmlDetailSubset[-inTrain,]
+
+```
+
+At this point, the data contains all numeric measurement data and a response variable, 'classe', which contains letters A,B,C,D or E. The goal of this project is to use the numeric variables to predict one of these five classes. Initially, I attempted to use all variables and attempt a simple classification tree. The code and results of this first analysis are below:
+
+```{r CLASSTREE, message=FALSE, warning=FALSE}
+
+set.seed(32343)
+
+# Test 1 - Trees
+
+modFit <- train(classe ~., method="rpart",data=training)
+print(modFit$finalModel)
+
+#plot(modFit$finalModel, uniform=TRUE,main="Classification Tree")
+#text(modFit$finalModel,use.n=TRUE,all=TRUE,cex=0.8)
+
+library(rattle)
+fancyRpartPlot(modFit$finalModel)
+
+pred=predict(modFit, newdata=validation)
+validation$predRight <- pred==validation$classe
+table(pred,validation$classe)
+table(validation$predRight)
+accuracyTree = sum(validation$predRight)/nrow(validation)
+paste0("Accuracy is ",accuracyTree)
+```
+
+As can be seen from the code, I first trained the model with the training set and then used the validation set to predict the out of sample error.
+
+
+
+The accuracy of this model is poor. Next, I attempted to use Linear Discriminant Analysis, to see if I could improve on the classification tree result.
+
+````{r LDA, message=FALSE, warning=FALSE}
+
+# Model 2 - build linear discriminant analysis (LDA) model
+
+modlda = train(classe ~ ., data=training,method='lda')
+
+plda = predict(modlda,validation)
+
+table(plda,validation$classe)
+
+paste0("Accuracy is ",sum(plda==validation$classe)/nrow(validation))
+
+```
+
+So, LDA produced a much better model, but still not a great result. 
+
+Next, I decided to reduce the dimensionality of the data using principal component analysis, as I wanted to use more sophisticated methods and the sheer number of variables would make the problem too compute and memory intensive. Below is the code to create the principal components from the training set.
+
+```{r PCA, message=FALSE, warning=FALSE}
+
+# Reduce dimensionality by Principal Component Analysis
+
+# Use PCA - center data and apply BoxCox transformation
+
+trans = preProcess(training[,1:52],method=c("BoxCox","center","scale","pca"))
+pcatraining = predict(trans, training[,1:52])
+classe = training$classe
+pcatraining = cbind(pcatraining,classe)
+```
+
+Next, the Random Forest algorithm was chosen. Because the data set was still very large, I decided to reduce the number of trees from the default to 100. I also tested this with n.tree=200 with similar results. If I had a more powerful computer and more memory, I would have used the default of 500 to see if there were significantly better results. Note that I also tried the GBM model, but had insufficient memory to run this in a realistic timeframe. Apparently, there is a known memory leak with that algorithm (see StackOverflow.com), so I abandoned training with that algorithm.
+
+
+```{r RF, message=FALSE, warning=FALSE}
+# Model 3 - Random Forest
+
+set.seed(32343)
+modFitRF <- train(classe~., data=pcatraining,method="rf",ntree=100)
+modFitRF
+predRFTrain <- predict(modFitRF,pcatraining)
+sum(predRFTrain==training$classe)/nrow(pcatraining)
+
+pcaval = predict(trans, validation[,1:52])
+predRFVal <- predict(modFitRF,pcaval)
+
+confusionMatrix(validation$classe,predRFVal)
+
+```
+Excellent results! The estimated out of sample error is very small - just a few percent. Accuracy for a depth of 100 trees is greater than 95% on the validation set. Rerunning with 200 trees produced a similar answer. With this accuracy, I would expect to get approximately a 5% error on my test set. In fact, I had 2 cases incorrect in the small 20 sample test set.
+
+###Summary
+In summary, the Random Forest model outperformed the other, simpler models significantly, with a 90% accuracy on the testing set. Given additional time, I would like to have tried some of the other methods presented in the class. However, I believe that the Random Forest method produced quite good results.
+
+
